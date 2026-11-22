@@ -2,7 +2,7 @@
   "uuid": "terminal-here@hbenali.github.io",
   "name": "Terminal Here",
   "description": "Press the shortcut (Ctrl+Alt+T by default) to open a new terminal in the working directory of the focused terminal, like Konsole on KDE. With any other window focused it opens your default terminal in your home directory.\n\nWorks with terminals that run one process per window (kitty, Alacritty, WezTerm, foot, xterm...) out of the box. Terminals that host many tabs in one process (Tilix, GNOME Terminal) need a small optional shell hook when several terminals are open; see the project page.",
-  "shell-version": ["50"],
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
   "settings-schema": "org.gnome.shell.extensions.terminal-here",
   "url": "https://github.com/hbenali/terminal-here",
   "version-name": "1.0.0"

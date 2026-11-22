@@ -56,7 +56,10 @@ means the system default), fallback directory (empty means home).
   fallback is used. Only bash is covered by the hook.
 - With several terminals each running a full-screen program, the one that started its command most
   recently is chosen.
-- Developed and tested on GNOME Shell 50 (Fedora 44).
+- Tested in a running GNOME Shell on version 50 only (Fedora 44). Versions 45 to 49 are declared
+  because the extension API is the same since GNOME 45; the unit tests pass on their GJS runtimes
+  (1.78 to 1.86), but the extension has not been run inside those shells. Reports welcome.
+- GNOME 44 and older use the legacy extension API and are not supported.
 
 ## Development
 
