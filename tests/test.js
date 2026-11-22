@@ -2,7 +2,7 @@
 // Run: gjs -m tests/test.js   (needs python3, used to create a pty)
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
-import {parseStat, snapshot, descendants, shellsUnder, cwdOf, readHints, chooseShell}
+import {parseStat, snapshot, descendants, shellsUnder, cwdOf, isDirectory, readHints, chooseShell, isCancelled}
     from '../terminal-here@hbenali.github.io/procinfo.js';
 import {findTerminal, findByCommand} from '../terminal-here@hbenali.github.io/terminals.js';
 
@@ -49,10 +49,11 @@ const proc = Gio.Subprocess.new(
     Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE);
 const root = parseInt(proc.get_identifier(), 10);
 GLib.usleep(700000);
-const snap = snapshot();
+const snap = await snapshot();
 const shells = shellsUnder(snap, root);
 eq('found exactly one shell under the window process', shells.length, 1);
-eq('shell cwd follows cd (path with space)', cwdOf(shells[0]), sub);
+eq('shell cwd follows cd (path with space)', await cwdOf(shells[0]), sub);
+eq('cwd of a missing pid', await cwdOf(999999), null);
 eq('window process itself is not a shell', shells.includes(root), false);
 proc.force_exit();
 
@@ -63,10 +64,33 @@ GLib.file_set_contents(`${hd}/focus`, '1234\n');
 GLib.file_set_contents(`${hd}/run-10`, '');
 GLib.usleep(20000);
 GLib.file_set_contents(`${hd}/run-11`, '');
-const h = readHints(hd);
+const h = await readHints(hd);
 eq('focus hint read', h.focus, 1234);
 eq('running hints newest first', h.running.map(r => r.pid), [11, 10]);
-eq('missing hint dir', readHints(`${dir}/nope`), {focus: null, running: []});
+eq('missing hint dir', await readHints(`${dir}/nope`), {focus: null, running: []});
+
+// --- isDirectory
+eq('isDirectory on a directory', await isDirectory(sub), true);
+eq('isDirectory on a file', await isDirectory(`${hd}/focus`), false);
+eq('isDirectory on a missing path', await isDirectory(`${dir}/nope`), false);
+eq('isDirectory on empty', await isDirectory(''), false);
+
+// --- cancellation must propagate, not be swallowed
+const cancelled = new Gio.Cancellable();
+cancelled.cancel();
+let threw = null;
+try { await snapshot(cancelled); } catch (e) { threw = isCancelled(e); }
+eq('snapshot rejects when cancelled', threw, true);
+threw = null;
+try { await readHints(hd, cancelled); } catch (e) { threw = isCancelled(e); }
+eq('readHints rejects when cancelled', threw, true);
+
+// --- speed: a full scan must not take noticeable time
+const t0 = GLib.get_monotonic_time();
+const big = await snapshot();
+const ms = (GLib.get_monotonic_time() - t0) / 1000;
+print(`info scan of ${big.size} processes took ${ms.toFixed(0)} ms`);
+eq('scan finishes in under 1s', ms < 1000, true);
 
 GLib.spawn_command_line_sync(`rm -rf "${dir}"`);
 print(failed ? `\n${failed} FAILED` : '\nall passed');

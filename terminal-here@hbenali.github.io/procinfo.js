@@ -1,15 +1,47 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Finds the shell behind a terminal window by walking /proc, plus the optional hints
 // written by shell-integration/terminal-here.bash for terminals that host many ttys.
+//
+// All file access is asynchronous and cancellable so nothing blocks the shell's main loop.
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 
-const decoder = new TextDecoder();
+Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
+Gio._promisify(Gio.File.prototype, 'enumerate_children_async', 'enumerate_children_finish');
+Gio._promisify(Gio.File.prototype, 'query_info_async', 'query_info_finish');
+Gio._promisify(Gio.FileEnumerator.prototype, 'next_files_async', 'next_files_finish');
+Gio._promisify(Gio.FileEnumerator.prototype, 'close_async', 'close_finish');
 
-function readText(path) {
-    const [ok, bytes] = GLib.file_get_contents(path);
-    return ok ? decoder.decode(bytes) : null;
+const decoder = new TextDecoder();
+const PRIORITY = GLib.PRIORITY_DEFAULT;
+
+/** True if the error is a cancellation, which callers must not swallow. */
+export function isCancelled(e) {
+    return e instanceof GLib.Error && e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED);
+}
+
+async function readText(path, cancellable) {
+    const [bytes] = await Gio.File.new_for_path(path).load_contents_async(cancellable);
+    return decoder.decode(bytes);
+}
+
+/** Infos of every entry of a directory. */
+async function listDir(path, attributes, cancellable) {
+    const dir = await Gio.File.new_for_path(path).enumerate_children_async(
+        attributes, Gio.FileQueryInfoFlags.NONE, PRIORITY, cancellable);
+    const infos = [];
+    try {
+        for (;;) {
+            const batch = await dir.next_files_async(256, PRIORITY, cancellable);
+            if (batch.length === 0)
+                break;
+            infos.push(...batch);
+        }
+    } finally {
+        dir.close_async(PRIORITY, null).catch(() => {});
+    }
+    return infos;
 }
 
 /** Parse /proc/PID/stat. The command name is parenthesised and may contain spaces. */
@@ -26,29 +58,28 @@ export function parseStat(text) {
 }
 
 /** Map pid -> {pid, ppid, sid, tty} for every process we can read. */
-export function snapshot() {
+export async function snapshot(cancellable = null) {
     const procs = new Map();
-    let dir;
+    let infos;
     try {
-        dir = Gio.File.new_for_path('/proc').enumerate_children(
-            'standard::name', Gio.FileQueryInfoFlags.NONE, null);
+        infos = await listDir('/proc', 'standard::name', cancellable);
     } catch (e) {
+        if (isCancelled(e))
+            throw e;
         return procs;
     }
-    let info;
-    while ((info = dir.next_file(null)) !== null) {
-        const name = info.get_name();
-        if (!/^\d+$/.test(name))
-            continue;
+    const names = infos.map(i => i.get_name()).filter(n => /^\d+$/.test(n));
+    await Promise.all(names.map(async name => {
         try {
-            const st = parseStat(readText(`/proc/${name}/stat`) ?? '');
+            const st = parseStat(await readText(`/proc/${name}/stat`, cancellable));
             if (st)
                 procs.set(st.pid, st);
         } catch (e) {
+            if (isCancelled(e))
+                throw e;
             // process exited while scanning
         }
-    }
-    dir.close(null);
+    }));
     return procs;
 }
 
@@ -80,12 +111,31 @@ export function shellsUnder(procs, root) {
     });
 }
 
-/** Working directory of a process, or null. */
-export function cwdOf(pid) {
+/** Working directory of a process (the target of /proc/PID/cwd), or null. */
+export async function cwdOf(pid, cancellable = null) {
     try {
-        return GLib.file_read_link(`/proc/${pid}/cwd`);
+        const info = await Gio.File.new_for_path(`/proc/${pid}/cwd`).query_info_async(
+            'standard::symlink-target', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, PRIORITY, cancellable);
+        return info.get_symlink_target();
     } catch (e) {
+        if (isCancelled(e))
+            throw e;
         return null;
+    }
+}
+
+/** True if path exists and is a directory. */
+export async function isDirectory(path, cancellable = null) {
+    if (!path)
+        return false;
+    try {
+        const info = await Gio.File.new_for_path(path).query_info_async(
+            'standard::type', Gio.FileQueryInfoFlags.NONE, PRIORITY, cancellable);
+        return info.get_file_type() === Gio.FileType.DIRECTORY;
+    } catch (e) {
+        if (isCancelled(e))
+            throw e;
+        return false;
     }
 }
 
@@ -94,19 +144,20 @@ export function cwdOf(pid) {
  *   focus      pid of the shell whose terminal last reported focus-in
  *   run-PID    exists while that shell runs a command (newest mtime first)
  */
-export function readHints(dir = GLib.build_filenamev([GLib.get_user_runtime_dir(), 'terminal-here'])) {
+export async function readHints(
+    dir = GLib.build_filenamev([GLib.get_user_runtime_dir(), 'terminal-here']), cancellable = null) {
     const hints = {focus: null, running: []};
     try {
-        const n = parseInt((readText(`${dir}/focus`) ?? '').trim(), 10);
+        const n = parseInt((await readText(`${dir}/focus`, cancellable)).trim(), 10);
         hints.focus = Number.isNaN(n) ? null : n;
     } catch (e) {
+        if (isCancelled(e))
+            throw e;
         // no hook installed
     }
     try {
-        const en = Gio.File.new_for_path(dir).enumerate_children(
-            'standard::name,time::modified,time::modified-usec', Gio.FileQueryInfoFlags.NONE, null);
-        let info;
-        while ((info = en.next_file(null)) !== null) {
+        const infos = await listDir(dir, 'standard::name,time::modified,time::modified-usec', cancellable);
+        for (const info of infos) {
             const m = /^run-(\d+)$/.exec(info.get_name());
             if (m) {
                 hints.running.push({
@@ -116,8 +167,9 @@ export function readHints(dir = GLib.build_filenamev([GLib.get_user_runtime_dir(
                 });
             }
         }
-        en.close(null);
     } catch (e) {
+        if (isCancelled(e))
+            throw e;
         // no hook installed
     }
     hints.running.sort((a, b) => b.mtime - a.mtime);
