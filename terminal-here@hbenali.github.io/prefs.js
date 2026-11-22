@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import Adw from 'gi://Adw';
+import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
@@ -10,12 +11,15 @@ export default class TerminalHerePreferences extends ExtensionPreferences {
         const page = new Adw.PreferencesPage();
         const group = new Adw.PreferencesGroup({
             title: 'Terminal Here',
-            description: 'Open a new terminal in the focused terminal\'s directory.',
+            // Row titles and descriptions are Pango markup, so literal "<" must be escaped.
+            description: GLib.markup_escape_text(
+                'Open a new terminal in the focused terminal\'s directory. ' +
+                'Shortcut format: <Control><Alt>t', -1),
         });
         page.add(group);
 
         const shortcut = new Adw.EntryRow({
-            title: 'Shortcut (e.g. <Control><Alt>t)',
+            title: 'Shortcut',
             text: settings.get_strv('shortcut')[0] ?? '',
             show_apply_button: true,
         });
@@ -48,5 +52,10 @@ export default class TerminalHerePreferences extends ExtensionPreferences {
         group.add(fallback);
 
         window.add(page);
+        // Don't open with the first entry focused and its text selected.
+        GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            window.set_focus(null);
+            return GLib.SOURCE_REMOVE;
+        });
     }
 }
